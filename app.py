@@ -149,17 +149,22 @@ def display_df_with_mismatch_highlight(df):
             axis=0
             )
         )
-        # Calculate summary stats on filtered data
-        summary_df = df.groupby('Average VAT rate (%)')[[
+        # Calculate summary stats on filtered data, excluding mismatches
+        matching_df = df[~df['Amount Mismatch']]
+        # Calculate total amount and VAT for each VAT rate
+        matching_df['Amount Excl VAT'] = matching_df['Total Paid WGR'] / (1 + matching_df['Average VAT rate (%)'] / 100)
+        matching_df['VAT Amount'] = matching_df['Total Paid WGR'] - matching_df['Amount Excl VAT']
+        
+        summary_df = matching_df.groupby('Average VAT rate (%)')[[
             'Total Paid WGR',
-            'Belopp', 
-            'Amount Difference'
-        ]].agg({
-            'Total Paid WGR': 'sum',
-            'Belopp': 'sum',
-            'Amount Difference': 'sum'
-        }).round(2)
-        st.write("Summary by VAT Percentage")
+            'Amount Excl VAT',
+            'VAT Amount'
+        ]].agg('sum').round(2)
+        
+        if len(df[df['Amount Mismatch']]) > 0:
+            st.write(f"Summary by VAT Percentage (Excluding :red[{len(df[df['Amount Mismatch']])} Mismatches])")
+        else:
+            st.write("Summary by VAT Percentage")
         st.dataframe(summary_df)
 
 def display_results(results, date_column):
