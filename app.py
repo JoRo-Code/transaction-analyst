@@ -30,11 +30,12 @@ def get_user_inputs():
                                 value=datetime.now().replace(day=1),
                                 format="YYYY-MM-DD")
     with col2:
+        # Get last day of current month
+        next_month = datetime.now().replace(day=1) + timedelta(days=32)
+        last_day = (next_month.replace(day=1) - timedelta(days=1)).date()
         end_date = st.date_input("End Date",
-                              value=datetime.now().replace(day=1) + timedelta(days=32),
+                              value=last_day,
                               format="YYYY-MM-DD")
-        end_date = end_date.replace(day=1) - timedelta(days=1)  # Last day of month
-    
     if wgr_file is None or qliro_file is None:
         return None, None, start_date, end_date
         
@@ -53,7 +54,7 @@ def process_data(wgr_df, qliro_df, start_date, end_date):
         # filter for QLIROCHECKOUT
         wgr_df = wgr_df[wgr_df['Payment method'] == 'QLIROCHECKOUT']
         # filter columns
-        wgr_df = wgr_df[[WGR_ORDER_ID, 'Total amount excl. VAT', 'Total VAT', 'Order time']]
+        wgr_df = wgr_df[[WGR_ORDER_ID, 'Total amount excl. VAT', 'Total VAT','Price excl. VAT', 'Average VAT rate (%)', 'Order time']]
 
         ### QLIRO ###
         # fix orderIDs
@@ -71,6 +72,10 @@ def process_data(wgr_df, qliro_df, start_date, end_date):
         # add total amount excl. VAT and total VAT to qliro_df
         wgr_df['Total Paid WGR'] = wgr_df['Total amount excl. VAT'] + wgr_df['Total VAT']
 
+        # If Total Paid WGR is 0, calculate it from Price excl. VAT and VAT rate
+        mask = wgr_df['Total Paid WGR'] == 0
+        wgr_df.loc[mask, 'Total Paid WGR'] = wgr_df.loc[mask, 'Price excl. VAT'] * (1 + wgr_df.loc[mask, 'Average VAT rate (%)'] / 100)
+
         merged_df = pd.merge(
             wgr_df,
             qliro_df, 
@@ -86,6 +91,9 @@ def process_data(wgr_df, qliro_df, start_date, end_date):
         merged_df['Total Paid WGR'] = pd.to_numeric(merged_df['Total Paid WGR'], errors='coerce')
         merged_df['Belopp'] = pd.to_numeric(merged_df['Belopp'], errors='coerce')
         
+        
+        
+        ###### Find mismatches ######
         # Round values to 2 decimal places to avoid floating point comparison issues
         merged_df['Total Paid WGR'] = merged_df['Total Paid WGR'].round(2)
         merged_df['Belopp'] = merged_df['Belopp'].round(2)
@@ -96,6 +104,10 @@ def process_data(wgr_df, qliro_df, start_date, end_date):
         # Add a column to flag mismatched amounts, using small threshold for floating point
         merged_df['Amount Mismatch'] = merged_df['Amount Difference'].abs() > 0.01
         
+        
+        
+        
+        
         # fix date types
         merged_df['Order time'] = pd.to_datetime(merged_df['Order time'])
         merged_df['Avräkningsdatum'] = pd.to_datetime(merged_df['Avräkningsdatum'])
@@ -104,8 +116,19 @@ def process_data(wgr_df, qliro_df, start_date, end_date):
         start_datetime = pd.to_datetime(start_date)
         end_datetime = pd.to_datetime(end_date)
 
+        # Debug date filtering
+        st.write("Start datetime:", start_datetime)
+        st.write("End datetime:", end_datetime)
+        st.write("Order time sample:", merged_df['Order time'].head())
+        st.write("Order time dtype:", merged_df['Order time'].dtype)
+        st.write("Raw end date:", end_date)
+        st.write("End date parsed:", pd.to_datetime(end_date))
+        st.write("End date parsed with format:", pd.to_datetime(end_date, format='%Y-%m-%d'))
         # filter for period
-        merged_in_period_df = merged_df[(merged_df['Order time'] >= start_datetime) & (merged_df['Order time'] <= end_datetime)]
+        merged_in_period_df = merged_df[(merged_df['Order time'] >= start_datetime) & (merged_df['Order time'] <= end_datetime)].copy()
+        
+        # Debug filtered results
+        st.write("Number of rows after filtering:", len(merged_in_period_df))
 
         results ={}
         results[ResultType.MATCHING] = merged_df
@@ -116,15 +139,20 @@ def process_data(wgr_df, qliro_df, start_date, end_date):
         st.error(f"Error processing files: {str(e)}")
         return None
 
-def display_results(results):
-    """Display the analysis results in Streamlit"""
-    st.subheader("All matching orders ")
-    st.dataframe(
-        results[ResultType.MATCHING].style.apply(
-            lambda x: ['background-color: #8B0000' if v else '' for v in results[ResultType.MATCHING]['Amount Mismatch']], 
+def display_df_with_mismatch_highlight(df):
+        st.dataframe(
+        df.style.apply(
+            lambda x: ['background-color: #8B0000' if v else '' for v in df['Amount Mismatch']], 
             axis=0
         )
     )
+
+def display_results(results):
+    """Display the analysis results in Streamlit"""
+    st.subheader("All matching orders ")
+    
+    display_df_with_mismatch_highlight(results[ResultType.MATCHING])
+    
     
     st.subheader("Matching orders within selected period")
     st.dataframe(results[ResultType.MATCHING_ORDER_TIME_IN_PERIOD])
