@@ -6,16 +6,18 @@ import streamlit.web.bootstrap
 
 from enum import Enum, auto
 
+SETTLEMENT_DATE = 'Avräkningsdatum'
+ORDER_TIME = 'Order time'
+
 class ResultType(Enum):
     """Enum for different types of analysis results"""
     MATCHING = auto() 
     MATCHING_ORDER_TIME_IN_PERIOD = auto()
-
+    MATCHING_AHEAD = auto()
 
 def get_user_inputs():
     """Get all user inputs from the Streamlit interface"""
     st.title("Transaction Analyst - WGR QLIRO")
-    st.write("This app is used to analyze transactions from WGR and QLIRO.")
 
     # File uploaders
     st.subheader("Upload Files")
@@ -24,27 +26,31 @@ def get_user_inputs():
 
     # Date range selector 
     st.subheader("Select Period")
+    st.write("Note: each date starts at 00:00:00")
     col1, col2 = st.columns(2)
     with col1:
         start_date = st.date_input("Start Date",
                                 value=datetime.now().replace(day=1),
                                 format="YYYY-MM-DD")
     with col2:
-        # Get last day of current month
+        # Get last day of current month at end of day
         next_month = datetime.now().replace(day=1) + timedelta(days=32)
-        last_day = (next_month.replace(day=1) - timedelta(days=1)).date()
+        last_day = (next_month.replace(day=1) - timedelta(days=1))
         end_date = st.date_input("End Date",
-                              value=last_day,
+                              value=last_day.date(),
                               format="YYYY-MM-DD")
     if wgr_file is None or qliro_file is None:
-        return None, None, start_date, end_date
+        return None, None, start_date, end_date, None
         
     wgr_df = pd.read_csv(wgr_file, delimiter='\t', encoding='utf-16')
     qliro_df = pd.read_csv(qliro_file, sep=';')
+    
+    # choose which date to use
+    date_column = st.selectbox("Choose date for filtering", [SETTLEMENT_DATE, ORDER_TIME])
 
-    return wgr_df, qliro_df, start_date, end_date
+    return wgr_df, qliro_df, start_date, end_date, date_column
 
-def process_data(wgr_df, qliro_df, start_date, end_date):
+def process_data(wgr_df, qliro_df, start_date, end_date, date_column):
     """Process the uploaded files and return analysis results"""
     QLIRO_ORDER_ID = 'Butiksordernummer'
     WGR_ORDER_ID = 'Order ID'
@@ -54,14 +60,14 @@ def process_data(wgr_df, qliro_df, start_date, end_date):
         # filter for QLIROCHECKOUT
         wgr_df = wgr_df[wgr_df['Payment method'] == 'QLIROCHECKOUT']
         # filter columns
-        wgr_df = wgr_df[[WGR_ORDER_ID, 'Total amount excl. VAT', 'Total VAT','Price excl. VAT', 'Average VAT rate (%)', 'Order time']]
+        wgr_df = wgr_df[[WGR_ORDER_ID, 'Total amount excl. VAT', 'Total VAT','Price excl. VAT', 'Average VAT rate (%)', ORDER_TIME]]
 
         ### QLIRO ###
         # fix orderIDs
         qliro_df[QLIRO_ORDER_ID] = qliro_df[QLIRO_ORDER_ID].str.replace('WGR', '')
 
         # filter columns
-        qliro_df = qliro_df[[QLIRO_ORDER_ID, 'Belopp','Avräkningsstatus', 'Avräkningsdatum', 'Transaktionsslutdatum', 'Betalning transaktionsreferens']]
+        qliro_df = qliro_df[[QLIRO_ORDER_ID, 'Belopp','Avräkningsstatus', SETTLEMENT_DATE, 'Transaktionsslutdatum', 'Betalning transaktionsreferens']]
 
         # merge dfs
         # ensure same types
@@ -110,7 +116,7 @@ def process_data(wgr_df, qliro_df, start_date, end_date):
         
         # fix date types
         merged_df['Order time'] = pd.to_datetime(merged_df['Order time'])
-        merged_df['Avräkningsdatum'] = pd.to_datetime(merged_df['Avräkningsdatum'])
+        merged_df[SETTLEMENT_DATE] = pd.to_datetime(merged_df[SETTLEMENT_DATE])
 
         # Convert date inputs to datetime for comparison
         start_datetime = pd.to_datetime(start_date)
@@ -119,20 +125,17 @@ def process_data(wgr_df, qliro_df, start_date, end_date):
         # Debug date filtering
         st.write("Start datetime:", start_datetime)
         st.write("End datetime:", end_datetime)
-        st.write("Order time sample:", merged_df['Order time'].head())
-        st.write("Order time dtype:", merged_df['Order time'].dtype)
-        st.write("Raw end date:", end_date)
-        st.write("End date parsed:", pd.to_datetime(end_date))
-        st.write("End date parsed with format:", pd.to_datetime(end_date, format='%Y-%m-%d'))
-        # filter for period
-        merged_in_period_df = merged_df[(merged_df['Order time'] >= start_datetime) & (merged_df['Order time'] <= end_datetime)].copy()
-        
-        # Debug filtered results
-        st.write("Number of rows after filtering:", len(merged_in_period_df))
 
-        results ={}
+        # filter for period
+        merged_in_period_df = merged_df[(merged_df[date_column] >= start_datetime) & (merged_df[date_column] <= end_datetime)].copy()
+        
+        # get orders ahead of period
+        merged_ahead_df = merged_df[merged_df[date_column] > end_datetime].copy()
+        
+        results = {}
         results[ResultType.MATCHING] = merged_df
         results[ResultType.MATCHING_ORDER_TIME_IN_PERIOD] = merged_in_period_df
+        results[ResultType.MATCHING_AHEAD] = merged_ahead_df
         return results
 
     except Exception as e:
@@ -144,31 +147,55 @@ def display_df_with_mismatch_highlight(df):
         df.style.apply(
             lambda x: ['background-color: #8B0000' if v else '' for v in df['Amount Mismatch']], 
             axis=0
+            )
         )
-    )
+        # Calculate summary stats on filtered data
+        summary_df = df.groupby('Average VAT rate (%)')[[
+            'Total Paid WGR',
+            'Belopp', 
+            'Amount Difference'
+        ]].agg({
+            'Total Paid WGR': 'sum',
+            'Belopp': 'sum',
+            'Amount Difference': 'sum'
+        }).round(2)
+        st.write("Summary by VAT Percentage")
+        st.dataframe(summary_df)
 
-def display_results(results):
+def display_results(results, date_column):
     """Display the analysis results in Streamlit"""
-    st.subheader("All matching orders ")
     
-    display_df_with_mismatch_highlight(results[ResultType.MATCHING])
+    st.subheader("Analysis results")
+    st.write("The following analysis is shown for orderIDs matching between WGR and QLIRO. Orders where the amount paid does not match the amount invoiced are :red[highlighted in red].")
+    # Display the full dataframe with mismatches highlighted in an expandable section
     
+    # Display first and last order in matched dataset
+    if not results[ResultType.MATCHING].empty:
+        st.write("First matched order time:", results[ResultType.MATCHING][date_column].min())
+        st.write("Last matched order time:", results[ResultType.MATCHING][date_column].max())
+
+        
+    with st.expander("Show all matching orders"):
+        display_df_with_mismatch_highlight(results[ResultType.MATCHING])
     
-    st.subheader("Matching orders within selected period")
-    st.dataframe(results[ResultType.MATCHING_ORDER_TIME_IN_PERIOD])
+    with st.expander("Orders within selected period"):
+        display_df_with_mismatch_highlight(results[ResultType.MATCHING_ORDER_TIME_IN_PERIOD])
+    
+    with st.expander("Orders ahead of selected period"):
+        display_df_with_mismatch_highlight(results[ResultType.MATCHING_AHEAD])
     
 
 def main():
     # Get user inputs
-    wgr_df, qliro_df, start_date, end_date = get_user_inputs()
+    wgr_df, qliro_df, start_date, end_date, date_column = get_user_inputs()
 
     # Process data if all inputs are provided
-    if wgr_df is not None and qliro_df is not None and start_date and end_date:
-        results = process_data(wgr_df, qliro_df, start_date, end_date)
+    if all(input is not None for input in [wgr_df, qliro_df, start_date, end_date, date_column]):
+        results = process_data(wgr_df, qliro_df, start_date, end_date, date_column)
         if results is not None:
-            display_results(results)
+            display_results(results, date_column)
     else:
-        st.info("Please upload both files and select a date range to analyze")
+        st.info("Please upload both files, select a date range, and choose a date column to analyze")
 
 if __name__ == "__main__":
     if "__streamlitmagic__" not in locals():
